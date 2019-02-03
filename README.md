@@ -63,6 +63,8 @@ On Android first the driver must be started with options given above. IQ-data go
   -------
 
 Copyright (c) 2017 <xael.south@yandex.com>
+Copyright (c) 2019 <carlos@hchs.de>
+
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions
 are met:

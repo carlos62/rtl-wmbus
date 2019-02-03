@@ -220,7 +220,7 @@ static const t1_c1_packet_decoder_state states[] =
     c1_rx_bit,                                     // 44
     c1_rx_last_data_bit,                           // 45
 
-    done,                                          // 46
+    done                                           // 46
 };
 
 
@@ -237,6 +237,7 @@ static struct
             unsigned err_3outof: 1;
             unsigned crc_ok: 1;
             unsigned c1_packet: 1;
+            unsigned type_b_frame: 1;
         };
     };
     unsigned l;
@@ -299,8 +300,15 @@ static void rx_low_nibble_last_lfield_bit(unsigned bit)
 
     if (t1_c1_packet_decoder_work.L == 0xFFu || byte == 0xFFu)
     {
-        if (t1_c1_packet_decoder_work.mode == C1_MODE_A || t1_c1_packet_decoder_work.mode == C1_MODE_B)
+        if (t1_c1_packet_decoder_work.mode == C1_MODE_A)
         {
+//           fprintf(stdout, "Mode C Frame A Detected\n");
+            t1_c1_packet_decoder_work.state = &states[26]; // c1_rx_first_mode_bit
+        }
+        else if (t1_c1_packet_decoder_work.mode == C1_MODE_B)
+        {
+//           fprintf(stdout, "Mode C Frame B Detected\n");
+            t1_c1_packet_decoder_work.type_b_frame = 1 ;
             t1_c1_packet_decoder_work.state = &states[26]; // c1_rx_first_mode_bit
         }
         else
@@ -386,6 +394,8 @@ static void c1_rx_last_mode_bit(unsigned bit)
     if (t1_c1_packet_decoder_work.byte == C1_MODE_AB_TRAILER)
     {
         t1_c1_packet_decoder_work.c1_packet = 1;
+        
+//        fprintf(stdout, "Mode C Preambel OK!\n");
     }
     else
     {
@@ -402,11 +412,21 @@ static void c1_rx_last_lfield_bit(unsigned bit)
 {
     t1_c1_packet_decoder_work.byte <<= 1;
     t1_c1_packet_decoder_work.byte |= (bit & PACKET_DATABIT_MASK);
+    
+//    fprintf(stdout, "Mode C Length %i\n",  t1_c1_packet_decoder_work.byte);
 
     t1_c1_packet_decoder_work.L = t1_c1_packet_decoder_work.byte;
     t1_c1_packet_decoder_work.l = 0;
-    t1_c1_packet_decoder_work.packet[t1_c1_packet_decoder_work.l++] = t1_c1_packet_decoder_work.L;
-    t1_c1_packet_decoder_work.L = FULL_TLG_LENGTH_FROM_L_FIELD[t1_c1_packet_decoder_work.L];
+    t1_c1_packet_decoder_work.packet[t1_c1_packet_decoder_work.l++] = t1_c1_packet_decoder_work.L ;
+//    THERE IS NO ADDITIONAL DATA IN FRAME TYPE B
+    if (!t1_c1_packet_decoder_work.type_b_frame)
+    {
+      t1_c1_packet_decoder_work.L = FULL_TLG_LENGTH_FROM_L_FIELD[t1_c1_packet_decoder_work.L];
+    }
+    else
+    {
+      t1_c1_packet_decoder_work.L++ ;
+    } ;
 }
 
 static void c1_rx_first_data_bit(unsigned bit)
@@ -418,6 +438,7 @@ static void c1_rx_last_data_bit(unsigned bit)
 {
     t1_c1_packet_decoder_work.byte <<= 1;
     t1_c1_packet_decoder_work.byte |= (bit & PACKET_DATABIT_MASK);
+//    fprintf(stdout, "Mode C Data %i %02x\n",  t1_c1_packet_decoder_work.l, t1_c1_packet_decoder_work.byte);
 
     t1_c1_packet_decoder_work.packet[t1_c1_packet_decoder_work.l++] = t1_c1_packet_decoder_work.byte;
 
@@ -427,6 +448,8 @@ static void c1_rx_last_data_bit(unsigned bit)
     }
     else
     {
+//        fprintf(stdout, "Mode C Hurra got IT\n");
+        
         time_t now;
         time(&now);
 
@@ -481,6 +504,48 @@ static bool check_calc_crc_wmbus(const uint8_t *data, size_t datalen)
     return crc_ok;
 }
 
+static bool check_calc_crc_wmbus_frame_b(const uint8_t *data, size_t datalen)
+{
+    bool crc_ok = false;
+    uint16_t crc1, crc2;
+
+    if (datalen < 13)
+    {
+//      fprintf(stdout,"Frame B First Segment CRC Wrong\n") ;
+      crc_ok = false ;
+    }
+    else
+    {
+        if (datalen > 128)
+        {
+            crc1 = calc_crc_wmbus(data, 126);
+            crc2 = (data[127] << 8) | (data[128]);
+            data += 128;
+            datalen -= 128;
+            crc_ok = (crc1 == crc2);
+            if (!crc_ok || (datalen < 3))
+            {
+                crc_ok = false ;
+            }
+            else
+            {
+                crc1 = calc_crc_wmbus(data, datalen-2);
+                crc2 = (data[datalen-2] << 8) | (data[datalen-1]);
+                crc_ok = (crc1 == crc2);
+            } ;
+        }
+        else
+        {
+            crc1 = calc_crc_wmbus(data, datalen-2);
+            crc2 = (data[datalen-2] << 8) | (data[datalen-1]);
+            crc_ok = (crc1 == crc2);
+//            if (!crc_ok) { fprintf(stdout,"Frame B Second Segment CRC Wrong\n") ; } ;
+        }
+    }
+
+    return crc_ok;
+}
+
 /** @brief Strip CRCs in place. */
 static unsigned cook_pkt(uint8_t *data, unsigned datalen)
 {
@@ -523,6 +588,35 @@ static unsigned cook_pkt(uint8_t *data, unsigned datalen)
     return dstlen;
 }
 
+static unsigned cook_pkt_frame_b(uint8_t *data, unsigned datalen)
+{
+    uint8_t *dst = data;
+    uint8_t *lenbyte = data;
+    unsigned dstlen = 0;
+
+    if (datalen < 13)
+    {
+        dstlen = datalen ;
+    }
+    else if (datalen <= 128)
+    {
+        dstlen = datalen - 2 ;
+    }
+    else
+    {
+        dst += 126 ;
+        data += 128 ;
+        dstlen = 126 ;        
+        memmove(dst, data, datalen-2);
+        dstlen += (datalen-2);
+    } ;
+    *lenbyte = dstlen ;
+    return dstlen;
+}
+
+
+
+
 static inline uint32_t get_serial(const uint8_t *const packet)
 {
     uint32_t serial;
@@ -544,7 +638,14 @@ static void t1_c1_packet_decoder(unsigned bit, unsigned rssi)
     }
     else if (*t1_c1_packet_decoder_work.state == done)
     {
-        t1_c1_packet_decoder_work.crc_ok = check_calc_crc_wmbus(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L) ? 1 : 0;
+        if (!t1_c1_packet_decoder_work.type_b_frame)
+        {
+          t1_c1_packet_decoder_work.crc_ok = check_calc_crc_wmbus(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L) ? 1 : 0;
+        }
+        else
+        {
+          t1_c1_packet_decoder_work.crc_ok = check_calc_crc_wmbus_frame_b(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L) ? 1 : 0;
+        } ;
 
         fprintf(stdout, "%s;%u;%u;%s;%u;%u;%08X;", t1_c1_packet_decoder_work.c1_packet ? "C1": "T1",
                 t1_c1_packet_decoder_work.crc_ok,
@@ -561,7 +662,14 @@ static void t1_c1_packet_decoder(unsigned bit, unsigned rssi)
 #endif
 
 #if 1
-        t1_c1_packet_decoder_work.L = cook_pkt(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L);
+        if (!t1_c1_packet_decoder_work.type_b_frame)
+        {
+          t1_c1_packet_decoder_work.L = cook_pkt(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L);
+        }
+        else
+        {
+          t1_c1_packet_decoder_work.L = cook_pkt_frame_b(t1_c1_packet_decoder_work.packet, t1_c1_packet_decoder_work.L);
+        } ;
         fprintf(stdout, "0x");
         for (size_t l = 0; l < t1_c1_packet_decoder_work.L; l++) fprintf(stdout, "%02x", t1_c1_packet_decoder_work.packet[l]);
 #endif
